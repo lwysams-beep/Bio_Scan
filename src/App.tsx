@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Scan, Activity, Brain, RefreshCw, Fingerprint, Crosshair, Smile, User, Dna, Microscope, Box } from 'lucide-react';
+import { Scan, Activity, Brain, RefreshCw, Fingerprint, Crosshair, Smile, User, Dna, Microscope, Box, ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
 
-// BioFuture Scan - v7.0 3D 結構生物掃描版
-// 1. [3D 核心] 引入 Z 軸深度運算，計算真實歐幾里得距離，抵抗角度偏差
-// 2. [人類學演算法] 使用下顎/顴骨比例判斷性別；使用眼角下垂度與法令紋深度估算年齡
-// 3. [視覺升級] 網格根據深度 (Z-depth) 變色，呈現立體地形圖效果
+// BioFuture Scan - v8.0 全方位動態掃描版
+// 1. [動態流程] 新增 5 階段頭部運動掃描 (正 -> 左 -> 右 -> 上 -> 下)
+// 2. [音效回饋] 每完成一個動作或微笑，播放提示音 (Beep)
+// 3. [3D 姿態] 使用 Z 軸深度差精準判斷頭部轉動角度
 
 const MP_VERSION = '0.4.1633559619'; 
 
@@ -12,7 +12,7 @@ export default function BioFutureScanApp() {
   const [logs, setLogs] = useState([]); 
   const [videoKey, setVideoKey] = useState(0); 
   
-  // UI 狀態
+  // UI 狀態: IDLE -> STARTING -> SCAN_CENTER -> SCAN_LEFT -> SCAN_RIGHT -> SCAN_UP -> SCAN_DOWN -> WAITING_SMILE -> ANALYZING -> RESULT
   const [systemState, setSystemState] = useState('IDLE'); 
   const [loadingStatus, setLoadingStatus] = useState("SYSTEM STANDBY");
   const [instruction, setInstruction] = useState("");
@@ -37,12 +37,15 @@ export default function BioFutureScanApp() {
   const streamRef = useRef(null);
   
   const stateRef = useRef('IDLE'); 
+  
+  // 計時器 ref，避免依賴 stale state
+  const holdTimer = useRef(0);
 
-  // 數據緩衝區 (取平均值用)
+  // 數據緩衝區
   const analysisBuffer = useRef({
     scores: [],
     ages: [],
-    genders: [], // 0 for Fem, 1 for Masc
+    genders: [], 
     symmetries: []
   });
 
@@ -71,11 +74,35 @@ export default function BioFutureScanApp() {
       document.head.appendChild(script);
     }
 
-    addLog("3D Structural Analysis Module Loaded.");
+    addLog("3D Omni-Scan Module Loaded.");
     initAI();
 
     return () => stopCamera(); 
   }, []);
+
+  // --- 🔊 音效系統 ---
+  const playBeep = (freq = 880, type = 'sine') => {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.frequency.setValueAtTime(freq, ctx.currentTime);
+      osc.type = type;
+      
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.15);
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.15);
+    } catch (e) {
+      console.error("Audio Error:", e);
+    }
+  };
 
   const initAI = async () => {
     try {
@@ -90,7 +117,7 @@ export default function BioFutureScanApp() {
 
   const startCameraSequence = async () => {
     setSystemState('STARTING');
-    setLoadingStatus("INITIALIZING 3D SENSORS...");
+    setLoadingStatus("INITIALIZING SENSORS...");
     
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert("Error: Camera API not supported.");
@@ -154,9 +181,11 @@ export default function BioFutureScanApp() {
 
   const startScanningMode = () => {
       analysisBuffer.current = { scores: [], ages: [], genders: [], symmetries: [] };
-      setSystemState('SCANNING_FACE');
-      setInstruction("建立 3D 臉部模型...請保持不動");
+      // 進入第一階段：正視前方
+      setSystemState('SCAN_CENTER');
+      setInstruction("請正視前方，掃描基準點...");
       setScanProgress(0);
+      playBeep(600, 'triangle'); // Start sound
   };
 
   const stopCamera = () => {
@@ -184,7 +213,7 @@ export default function BioFutureScanApp() {
           faceMesh.setOptions({
             maxNumFaces: 1,
             refineLandmarks: true,
-            minDetectionConfidence: 0.7, // 提高信心閾值，減少雜訊
+            minDetectionConfidence: 0.7, 
             minTrackingConfidence: 0.7
           });
 
@@ -208,80 +237,76 @@ export default function BioFutureScanApp() {
     requestRef.current = requestAnimationFrame(processFrame);
   };
 
-  // --- 🧬 3D 結構演算法 (Anthropometric 3D) ---
-  
-  // 計算 3D 空間中的兩點距離
+  // --- 🧬 3D 運算與姿態偵測 ---
   const getDistance3D = (p1, p2) => {
       return Math.sqrt(
           Math.pow(p1.x - p2.x, 2) + 
           Math.pow(p1.y - p2.y, 2) + 
-          Math.pow(p1.z - p2.z, 2) // 引入深度
+          Math.pow(p1.z - p2.z, 2) 
       );
   };
 
-  const calculate3DBiometrics = (landmarks) => {
-      // 1. 性別判斷 (Sexual Dimorphism)
-      // 使用 "下顎寬度 (Bigonial Width)" vs "顴骨寬度 (Bizygomatic Width)"
-      // 顴骨寬: 234 - 454
-      // 下顎寬: 58 - 288 (Gonions)
+  const detectHeadPose = (landmarks) => {
+      // 1. 左右轉 (Yaw): 比較左右臉頰的 Z 深度 (FaceMesh Z 越小越近)
+      // 左顴骨 234, 右顴骨 454
+      const leftZ = landmarks[234].z;
+      const rightZ = landmarks[454].z;
+      const yaw = leftZ - rightZ; // 正數代表左臉較遠->向右轉; 負數代表右臉較遠->向左轉
+      
+      // 2. 上下轉 (Pitch): 比較額頭(10)與下巴(152)的 Z 深度相對變化
+      // 這比較難單純用 Z 判斷，通常結合 Y 軸位移
+      // 簡單版：鼻尖(1)的 Y 座標相對於雙眼連線的高度變化
+      // 但用 Z 軸差異也可以：抬頭時下巴 Z 變小(近)，低頭時額頭 Z 變小(近)
+      const topZ = landmarks[10].z;
+      const chinZ = landmarks[152].z;
+      const pitch = topZ - chinZ; // 負數=抬頭(額頭遠), 正數=低頭(下巴遠)
+
+      return { yaw, pitch };
+  };
+
+  const calculateBiometrics = (landmarks) => {
+      const faceHeight = Math.hypot(landmarks[10].x - landmarks[152].x, landmarks[10].y - landmarks[152].y);
+      const faceWidth = Math.hypot(landmarks[234].x - landmarks[454].x, landmarks[234].y - landmarks[454].y);
+      const ratio = faceHeight / faceWidth;
+      const deviation = Math.abs(ratio - 1.618); 
+
+      const leftDist = getDistance3D(landmarks[234], landmarks[1]);
+      const rightDist = getDistance3D(landmarks[454], landmarks[1]);
+      const symmetry = 1 - (Math.min(leftDist, rightDist) / Math.max(leftDist, rightDist)); 
+
       const cheekWidth = getDistance3D(landmarks[234], landmarks[454]);
       const jawWidth = getDistance3D(landmarks[58], landmarks[288]);
-      
-      // 男性通常下顎較寬，比例接近 0.9 或更高。女性通常較V，比例較低。
       const jawRatio = jawWidth / cheekWidth;
-      // 0.0 = 女性特徵, 1.0 = 男性特徵 (正規化)
       const genderScore = Math.max(0, Math.min(1, (jawRatio - 0.7) * 5)); 
 
-      // 2. 年齡估算 (Age markers)
-      // A. 眼角下垂 (Canthal Tilt): 外眼角(33/263) 與 內眼角(133/362) 的 Y 軸差值
-      // 年輕時外眼角通常高於或平於內眼角。老化時外眼角會下垂。
-      const leftEyeTilt = landmarks[33].y - landmarks[133].y; // +值代表下垂
+      const leftEyeTilt = landmarks[33].y - landmarks[133].y; 
       const rightEyeTilt = landmarks[263].y - landmarks[362].y;
-      const eyeSag = (leftEyeTilt + rightEyeTilt) * 100; // 放大數值
+      const eyeSag = (leftEyeTilt + rightEyeTilt) * 100; 
 
-      // B. 軟組織鬆弛: 鼻翼(1)到下巴(152)的距離 vs 臉長
-      // 老化會導致下半臉軟組織堆積，視覺上變長
       const lowerFace = getDistance3D(landmarks[1], landmarks[152]);
       const upperFace = getDistance3D(landmarks[10], landmarks[1]);
-      const sagRatio = lowerFace / upperFace; // > 1.2 可能代表鬆弛或長臉
+      const sagRatio = lowerFace / upperFace; 
 
-      // 基礎年齡 + 特徵修正
-      // 基礎: 35
-      // 眼角每下垂一點 + 5歲
-      // 下半臉比例每增加 0.1 + 8歲
       let bioAge = 25 + (Math.max(0, eyeSag) * 300) + ((sagRatio - 1.0) * 40);
-      bioAge = Math.min(85, Math.max(18, bioAge)); // 限制在 18-85
+      bioAge = Math.min(85, Math.max(18, bioAge)); 
 
-      // 3. 評分 (Neoclassical Canons - 黃金三庭)
-      // 上庭: 髮際線(10) - 眉心(9)
-      // 中庭: 眉心(9) - 鼻下(2)
-      // 下庭: 鼻下(2) - 下巴(152)
-      // 注意：FaceMesh 的 10號點只是額頭頂部，不完全是髮際線，需做修正
-      const upperThird = getDistance3D(landmarks[10], landmarks[9]) * 1.5; // 修正係數
+      const upperThird = getDistance3D(landmarks[10], landmarks[9]) * 1.5; 
       const middleThird = getDistance3D(landmarks[9], landmarks[2]);
       const lowerThird = getDistance3D(landmarks[2], landmarks[152]);
-      
       const avgThird = (upperThird + middleThird + lowerThird) / 3;
-      const deviation = (
+      const thirdDeviation = (
           Math.abs(upperThird - avgThird) + 
           Math.abs(middleThird - avgThird) + 
           Math.abs(lowerThird - avgThird)
       ) / avgThird;
 
-      // 偏差值轉分數 (0偏差 = 0分完美, 偏差越大分數越高)
-      // 放大 30 倍讓差異明顯
-      let score = deviation * 30; 
+      let score = thirdDeviation * 30; 
       score = Math.min(9.9, Math.max(0.1, score));
-
-      // 4. 對稱性
-      const leftDist = getDistance3D(landmarks[234], landmarks[1]);
-      const rightDist = getDistance3D(landmarks[454], landmarks[1]);
-      const symmetry = Math.min(leftDist, rightDist) / Math.max(leftDist, rightDist);
 
       return {
           score,
           age: Math.floor(bioAge),
-          genderVal: genderScore, // 0-1
+          genderVal: genderScore, 
           symmetry
       };
   };
@@ -290,16 +315,13 @@ export default function BioFutureScanApp() {
       const buffer = analysisBuffer.current;
       if (buffer.scores.length === 0) return;
 
-      // 取樣平均值 (去除極端值)
       const avgScore = buffer.scores.reduce((a, b) => a + b, 0) / buffer.scores.length;
       const avgAge = buffer.ages.reduce((a, b) => a + b, 0) / buffer.ages.length;
       const avgGender = buffer.genders.reduce((a, b) => a + b, 0) / buffer.genders.length;
       const avgSym = buffer.symmetries.reduce((a, b) => a + b, 0) / buffer.symmetries.length;
 
-      // 根據平均值判定
       const genderStr = avgGender > 0.55 ? "MALE" : "FEMALE";
       
-      // 最終美化：如果對稱性很高，給予額外分數優化 (分數越低越好，所以扣分)
       let finalScore = avgScore;
       if (avgSym > 0.95) finalScore -= 0.5;
       finalScore = Math.max(0.1, finalScore).toFixed(1);
@@ -327,80 +349,138 @@ export default function BioFutureScanApp() {
         
         ctx.lineWidth = 1;
 
-        // --- 3D 視覺化繪圖 (Depth Map Visualization) ---
-        // 我們根據 Z 軸深度改變顏色，讓使用者感受到 "3D 掃描"
-        // Z 越小 (越近) = 越亮 (Yellow/Cyan), Z 越大 (越遠) = 越暗 (Blue/Purple)
-        
-        for (let i = 0; i < landmarks.length; i+=3) { // 繪製點雲
+        // 3D 視覺化
+        for (let i = 0; i < landmarks.length; i+=3) { 
             const pt = landmarks[i];
             const x = pt.x * width;
             const y = pt.y * height;
-            // Z 值通常在 -0.1 (鼻尖) 到 0.1 (耳後) 之間
-            // 映射到 0-1
             const zNorm = (pt.z + 0.1) * 5; 
-            const alpha = Math.max(0.2, 1 - zNorm); // 近的清楚，遠的模糊
+            const alpha = Math.max(0.2, 1 - zNorm); 
             
-            ctx.fillStyle = `rgba(6, 182, 212, ${alpha})`; // Cyan
-            if (i === 1) ctx.fillStyle = 'red'; // 鼻尖
-
+            ctx.fillStyle = `rgba(6, 182, 212, ${alpha})`; 
             ctx.beginPath();
             ctx.arc(x, y, 1.5, 0, 2 * Math.PI);
             ctx.fill();
         }
 
-        // 繪製 T 字部位 (結構線)
-        const tLine = [10, 152, 234, 454]; // 縱軸與橫軸
-        ctx.strokeStyle = 'rgba(250, 204, 21, 0.5)'; // Yellow
-        ctx.beginPath();
-        ctx.moveTo(landmarks[10].x * width, landmarks[10].y * height);
-        ctx.lineTo(landmarks[152].x * width, landmarks[152].y * height);
-        ctx.moveTo(landmarks[234].x * width, landmarks[234].y * height);
-        ctx.lineTo(landmarks[454].x * width, landmarks[454].y * height);
-        ctx.stroke();
-
-        // --- 數據採樣 ---
-        if (stateRef.current === 'SCANNING_FACE') {
-            const bio = calculate3DBiometrics(landmarks);
-            
-            // 存入緩衝區
-            analysisBuffer.current.scores.push(bio.score);
-            analysisBuffer.current.ages.push(bio.age);
-            analysisBuffer.current.genders.push(bio.genderVal);
-            analysisBuffer.current.symmetries.push(bio.symmetry);
-
-            setScanProgress(prev => {
-                const next = prev + 0.8;
-                if (next >= 100) {
-                    setSystemState('WAITING_SMILE');
-                    setInstruction("結構掃描完成。請微笑測試肌肉活性...");
-                    return 0;
-                }
-                return next;
-            });
+        // --- 多階段動態掃描邏輯 ---
+        const pose = detectHeadPose(landmarks);
+        const bio = calculateBiometrics(landmarks);
+        
+        // 採樣數據 (持續進行，越多角度越準)
+        if (['SCAN_CENTER', 'SCAN_LEFT', 'SCAN_RIGHT', 'SCAN_UP', 'SCAN_DOWN'].includes(stateRef.current)) {
+             analysisBuffer.current.scores.push(bio.score);
+             analysisBuffer.current.ages.push(bio.age);
+             analysisBuffer.current.genders.push(bio.genderVal);
+             analysisBuffer.current.symmetries.push(bio.symmetry);
         }
 
+        const THRESHOLD = 0.04; // 轉頭判定閾值
+        const SPEED = 2; // 進度條速度
+
+        // 1. 正視前方
+        if (stateRef.current === 'SCAN_CENTER') {
+            if (Math.abs(pose.yaw) < 0.02 && Math.abs(pose.pitch) < 0.02) {
+                setScanProgress(prev => {
+                    const next = prev + SPEED;
+                    if (next >= 100) {
+                        playBeep(880); // Success beep
+                        setSystemState('SCAN_LEFT');
+                        setInstruction("請向左轉頭...");
+                        return 0;
+                    }
+                    return next;
+                });
+            }
+        }
+
+        // 2. 向左轉 (右臉靠近相機，Yaw 為負) 
+        // 註：因為鏡像翻轉，使用者的左轉在畫面上也是往左，Yaw 值需實測微調
+        if (stateRef.current === 'SCAN_LEFT') {
+            if (pose.yaw < -THRESHOLD) { // 實際數值需依鏡頭調整
+                setScanProgress(prev => {
+                    const next = prev + SPEED;
+                    if (next >= 100) {
+                        playBeep(1000);
+                        setSystemState('SCAN_RIGHT');
+                        setInstruction("請向右轉頭...");
+                        return 0;
+                    }
+                    return next;
+                });
+            }
+        }
+
+        // 3. 向右轉
+        if (stateRef.current === 'SCAN_RIGHT') {
+            if (pose.yaw > THRESHOLD) {
+                setScanProgress(prev => {
+                    const next = prev + SPEED;
+                    if (next >= 100) {
+                        playBeep(1000);
+                        setSystemState('SCAN_UP');
+                        setInstruction("請稍微抬頭...");
+                        return 0;
+                    }
+                    return next;
+                });
+            }
+        }
+
+        // 4. 抬頭
+        if (stateRef.current === 'SCAN_UP') {
+            if (pose.pitch < -THRESHOLD) {
+                setScanProgress(prev => {
+                    const next = prev + SPEED;
+                    if (next >= 100) {
+                        playBeep(1000);
+                        setSystemState('SCAN_DOWN');
+                        setInstruction("請稍微低頭...");
+                        return 0;
+                    }
+                    return next;
+                });
+            }
+        }
+
+        // 5. 低頭
+        if (stateRef.current === 'SCAN_DOWN') {
+            if (pose.pitch > THRESHOLD) {
+                setScanProgress(prev => {
+                    const next = prev + SPEED;
+                    if (next >= 100) {
+                        playBeep(1200); // Higher pitch for completion
+                        setSystemState('WAITING_SMILE');
+                        setInstruction("掃描完成。請展露微笑...");
+                        return 0;
+                    }
+                    return next;
+                });
+            }
+        }
+
+        // 6. 微笑測試
         if (stateRef.current === 'WAITING_SMILE') {
-            // 檢測微笑幅度 (嘴角變寬)
             const mouthW = getDistance3D(landmarks[61], landmarks[291]);
             const faceW = getDistance3D(landmarks[234], landmarks[454]);
             const ratio = mouthW / faceW;
             
-            // 當微笑比例足夠大，進度條加速
-            const speed = ratio > 0.4 ? 2.5 : 0.5;
-
-            setScanProgress(prev => {
-                const next = prev + speed;
-                if (next >= 100) {
-                    setSystemState('ANALYZING');
-                    setInstruction("正在建立 3D 生物特徵報告...");
-                    setTimeout(() => {
-                        finalizeScore();
-                        setSystemState('RESULT');
-                    }, 1500);
-                    return 100;
-                }
-                return next;
-            });
+            if (ratio > 0.4) {
+                setScanProgress(prev => {
+                    const next = prev + 2;
+                    if (next >= 100) {
+                        playBeep(1500, 'square'); // Special success sound
+                        setSystemState('ANALYZING');
+                        setInstruction("正在生成 3D 綜合報告...");
+                        setTimeout(() => {
+                            finalizeScore();
+                            setSystemState('RESULT');
+                        }, 1500);
+                        return 100;
+                    }
+                    return next;
+                });
+            }
         }
       }
     }
@@ -432,7 +512,6 @@ export default function BioFutureScanApp() {
 
   return (
     <div style={styles.wrapper}>
-      {/* 1. 核心層 */}
       <video 
         key={videoKey}
         ref={videoRef} 
@@ -452,32 +531,29 @@ export default function BioFutureScanApp() {
         }} 
       />
 
-      {/* 2. 待機畫面 */}
       {(systemState === 'IDLE' || systemState === 'STARTING') && (
         <div style={styles.overlay}>
            <div style={{marginBottom: '2rem', display: 'flex', justifyContent: 'center'}}>
               <Box className={`w-24 h-24 text-cyan-400 ${systemState === 'STARTING' ? 'animate-spin' : ''}`} />
            </div>
-           <h1 className="text-4xl font-bold tracking-widest mb-2 text-center">3D BIO-METRIC</h1>
-           <p className="text-sm tracking-widest text-cyan-600 mb-8">三維結構掃描系統 v7.0</p>
+           <h1 className="text-4xl font-bold tracking-widest mb-2 text-center">3D OMNI-SCAN</h1>
+           <p className="text-sm tracking-widest text-cyan-600 mb-8">全方位生物掃描系統 v8.0</p>
            
            {systemState === 'STARTING' ? (
                <div className="text-emerald-400 animate-pulse text-xl">{loadingStatus}</div>
            ) : (
                <button onClick={startCameraSequence} style={styles.btn}>
-                   <Crosshair /> START 3D SCAN
+                   <Crosshair /> START SYSTEM
                </button>
            )}
         </div>
       )}
 
-      {/* 3. 掃描中 & 指令 (頂部 HUD) */}
-      {(systemState === 'SCANNING_FACE' || systemState === 'WAITING_SMILE' || systemState === 'ANALYZING' || systemState === 'RESULT') && (
+      {systemState !== 'IDLE' && systemState !== 'STARTING' && (
         <div className="absolute top-0 left-0 w-full z-20 pointer-events-none p-4 pt-8 md:pt-12">
            <div className="bg-slate-900/80 backdrop-blur-md border-b-2 border-cyan-500 p-4 rounded-b-2xl shadow-[0_0_30px_rgba(6,182,212,0.3)] flex flex-col items-center">
                
                {systemState === 'RESULT' ? (
-                   // 結果顯示
                    <div className="w-full flex flex-col items-center animate-fade-in-down">
                        <div className="flex items-center gap-2 text-yellow-400 mb-2">
                            <Brain className="w-5 h-5" />
@@ -507,7 +583,7 @@ export default function BioFutureScanApp() {
                                </span>
                                <span className="text-xs text-slate-500">/ 10</span>
                            </div>
-                           <span className="text-[10px] text-slate-500 mt-1">BASED ON GOLDEN RATIO & 3D GEOMETRY</span>
+                           <span className="text-[10px] text-slate-500 mt-1">0 = PERFECT SYMMETRY & RATIO</span>
                        </div>
 
                        <div className="mt-6 pointer-events-auto">
@@ -520,12 +596,22 @@ export default function BioFutureScanApp() {
                        </div>
                    </div>
                ) : (
-                   // 掃描過程
                    <div className="flex flex-col items-center w-full">
                        <div className="flex items-center gap-2 text-cyan-400 mb-1">
-                           {systemState === 'WAITING_SMILE' ? <Smile className="w-6 h-6 animate-bounce" /> : <Scan className="w-6 h-6 animate-pulse" />}
+                           {systemState === 'WAITING_SMILE' ? <Smile className="w-6 h-6 animate-bounce" /> : 
+                            systemState.includes('SCAN_') ? <RefreshCw className="w-6 h-6 animate-spin" /> :
+                            <Scan className="w-6 h-6 animate-pulse" />}
                            <span className="text-lg font-bold tracking-widest text-center">{instruction}</span>
                        </div>
+                       
+                       {/* 視覺引導圖示 */}
+                       <div className="flex gap-4 my-2 text-slate-600">
+                           <ChevronLeft className={systemState === 'SCAN_LEFT' ? 'text-cyan-400 animate-pulse scale-125' : ''} />
+                           <ChevronUp className={systemState === 'SCAN_UP' ? 'text-cyan-400 animate-pulse scale-125' : ''} />
+                           <ChevronDown className={systemState === 'SCAN_DOWN' ? 'text-cyan-400 animate-pulse scale-125' : ''} />
+                           <ChevronRight className={systemState === 'SCAN_RIGHT' ? 'text-cyan-400 animate-pulse scale-125' : ''} />
+                       </div>
+
                        <div className="w-full max-w-xs h-1 bg-slate-700 mt-2 rounded-full overflow-hidden">
                            <div className="h-full bg-cyan-500 transition-all duration-75" style={{width: `${scanProgress}%`}}></div>
                        </div>
