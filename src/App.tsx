@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Scan, Activity, Zap, Clock, Brain, RefreshCw, Camera, Fingerprint, ShieldAlert, Cpu } from 'lucide-react';
 
-// BioFuture Scan - 未來生物掃描儀 v2.0 (Production Fixed)
-// 1. [修復] 加入內聯樣式 (Inline Styles) 作為備援，解決 Vercel 上 Tailwind 載入失敗導致 UI 消失的問題
-// 2. [修復] 優化 AI 載入邏輯，增加錯誤回饋與手動重試機制
-// 3. [優化] 確保相機權限請求流程更順暢
+// BioFuture Scan - v2.1 iOS 優化版
+// 1. [修復] 白邊問題：強制設定 body/html 樣式，使用 100vw 與 overflow-hidden
+// 2. [修復] 按鈕無效：提升按鈕 z-index，優化 iOS 相機啟動流程
+// 3. [優化] 針對移動端觸控體驗調整按鈕大小與回饋
 
 const MP_VERSION = '0.4.1633559619'; 
 
@@ -17,6 +17,7 @@ export default function BioFutureScanApp() {
   const [loadingStatus, setLoadingStatus] = useState("SYSTEM INITIALIZING...");
   const [loadingError, setLoadingError] = useState(null);
   const [scanProgress, setScanProgress] = useState(0);
+  const [debugMsg, setDebugMsg] = useState(""); // 用於顯示 iOS 錯誤訊息
   
   // 分析結果
   const [metrics, setMetrics] = useState({
@@ -27,15 +28,24 @@ export default function BioFutureScanApp() {
   const isLooping = useRef(false);
   const requestRef = useRef(null);
 
-  // --- 1. 自動注入 Tailwind 與 字體 ---
+  // --- 1. 自動注入 Tailwind 與 字體，並強制重置 Body 樣式 ---
   useEffect(() => {
+    // 強制重置網頁邊距，解決白邊問題
+    document.body.style.margin = '0';
+    document.body.style.padding = '0';
+    document.body.style.overflowX = 'hidden';
+    document.body.style.backgroundColor = '#0f172a';
+    document.documentElement.style.margin = '0';
+    document.documentElement.style.padding = '0';
+    document.documentElement.style.overflowX = 'hidden';
+
     // 注入 Google Fonts
     const fontLink = document.createElement('link');
     fontLink.href = "https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap";
     fontLink.rel = "stylesheet";
     document.head.appendChild(fontLink);
 
-    // 嘗試注入 Tailwind (如果失敗，我們還有下方的 Inline Styles 保護)
+    // 嘗試注入 Tailwind
     if (!document.querySelector('script[src*="tailwindcss"]')) {
       const script = document.createElement('script');
       script.src = "https://cdn.tailwindcss.com";
@@ -63,7 +73,6 @@ export default function BioFutureScanApp() {
     setLoadingStatus("LOADING NEURAL NETWORKS...");
     
     try {
-      // 在 Vercel 環境稍微保守一點，只清除必要的衝突
       try { 
         if (window.process) window.process = undefined; 
       } catch(e) {}
@@ -75,7 +84,6 @@ export default function BioFutureScanApp() {
 
       if (window.FaceMesh) {
         setLoadingStatus("SYSTEM READY");
-        // 自動重置狀態，確保按鈕可見
         setSystemState('IDLE');
       } else {
         throw new Error("AI Core missing");
@@ -113,58 +121,78 @@ export default function BioFutureScanApp() {
     }));
   };
 
-  // --- 4. 相機迴圈 ---
+  // --- 4. 相機迴圈 (iOS 優化) ---
   const startScanning = async () => {
+    setDebugMsg("Requesting Camera...");
+    
     // 檢查瀏覽器支援
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert("您的瀏覽器不支援相機功能，請使用 Safari 或 Chrome。");
+      alert("您的瀏覽器不支援相機功能，請使用 Safari。");
       return;
     }
 
     try {
+      // 1. 優先請求權限 (這是最重要的步驟)
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { width: 1280, height: 720, facingMode: "user" } 
+        video: { 
+            width: { ideal: 1280 }, 
+            height: { ideal: 720 }, 
+            facingMode: "user" 
+        },
+        audio: false // 明確關閉 audio 避免額外權限請求
       });
       
+      setDebugMsg("Camera Active");
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        
+        // iOS 需要 playsInline 屬性 (已在 JSX 中加入)
+        // 必須等待載入完成
         videoRef.current.onloadedmetadata = async () => {
-          videoRef.current.play();
-          
-          if (!window.FaceMesh) {
-             alert("AI 尚未準備好，請稍候再試。");
-             return;
+          try {
+            await videoRef.current.play();
+            setDebugMsg("Video Playing");
+            
+            if (!window.FaceMesh) {
+               alert("AI 尚未準備好，請稍候再試。");
+               return;
+            }
+
+            const faceMesh = new window.FaceMesh({locateFile: (file) => 
+              `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@${MP_VERSION}/${file}`});
+            
+            faceMesh.setOptions({
+              maxNumFaces: 1,
+              refineLandmarks: true,
+              minDetectionConfidence: 0.5,
+              minTrackingConfidence: 0.5
+            });
+
+            faceMesh.onResults(onResults);
+            faceMeshRef.current = faceMesh;
+
+            setSystemState('SCANNING');
+            isLooping.current = true;
+            requestRef.current = requestAnimationFrame(processFrame);
+          } catch(playErr) {
+             setDebugMsg("Play Error: " + playErr.message);
+             alert("影片播放失敗: " + playErr.message);
           }
-
-          const faceMesh = new window.FaceMesh({locateFile: (file) => 
-            `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@${MP_VERSION}/${file}`});
-          
-          faceMesh.setOptions({
-            maxNumFaces: 1,
-            refineLandmarks: true,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
-          });
-
-          faceMesh.onResults(onResults);
-          faceMeshRef.current = faceMesh;
-
-          setSystemState('SCANNING');
-          isLooping.current = true;
-          requestRef.current = requestAnimationFrame(processFrame);
         };
       }
     } catch (e) {
-      alert("無法啟動相機: " + e.message + "\n請檢查權限設定。");
+      setDebugMsg("Cam Error: " + e.message);
+      alert("無法啟動相機: " + e.message + "\n請至設定開啟 Safari 相機權限。");
     }
   };
 
   const processFrame = async () => {
     if (!isLooping.current) return;
-    if (videoRef.current && faceMeshRef.current) {
+    if (videoRef.current && faceMeshRef.current && !videoRef.current.paused && !videoRef.current.ended) {
       try {
         await faceMeshRef.current.send({image: videoRef.current});
-      } catch (e) {} // 忽略單幀錯誤
+      } catch (e) {} 
     }
     requestRef.current = requestAnimationFrame(processFrame);
   };
@@ -209,24 +237,29 @@ export default function BioFutureScanApp() {
 
   // --- UI Renders ---
 
-  // 定義備援樣式 (即使 Tailwind 失敗也能運作)
+  // 強化版樣式
   const styles = {
     wrapper: {
-      backgroundColor: '#0f172a', // slate-900
-      color: '#22d3ee', // cyan-400
+      backgroundColor: '#0f172a', 
+      color: '#22d3ee', 
       minHeight: '100vh',
-      width: '100%',
+      width: '100vw',          // 強制視窗寬度
+      maxWidth: '100%',        // 防止溢出
+      overflowX: 'hidden',     // 隱藏水平捲軸
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
       overflow: 'hidden',
       position: 'relative',
-      fontFamily: '"Orbitron", monospace'
+      fontFamily: '"Orbitron", monospace',
+      margin: 0,
+      padding: 0,
+      boxSizing: 'border-box'
     },
     button: {
-      padding: '1rem 3rem',
-      backgroundColor: 'transparent',
+      padding: '1.2rem 3rem',  // 加大觸控區域
+      backgroundColor: 'rgba(6, 182, 212, 0.1)',
       border: '2px solid #06b6d4',
       color: '#22d3ee',
       fontSize: '1.2rem',
@@ -236,12 +269,17 @@ export default function BioFutureScanApp() {
       marginTop: '2rem',
       display: 'flex',
       alignItems: 'center',
-      gap: '10px'
+      gap: '12px',
+      zIndex: 50,              // [關鍵] 提升層級，確保可點擊
+      position: 'relative',
+      touchAction: 'manipulation', // 優化觸控反應
+      borderRadius: '4px',
+      boxShadow: '0 0 15px rgba(6, 182, 212, 0.3)'
     }
   };
 
   const renderBackground = () => (
-    <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
+    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 0, pointerEvents: 'none' }}>
        <div style={{
             position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
             backgroundImage: 'linear-gradient(rgba(6, 182, 212, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(6, 182, 212, 0.1) 1px, transparent 1px)',
@@ -256,25 +294,26 @@ export default function BioFutureScanApp() {
       <div style={styles.wrapper} className="bg-slate-900 text-cyan-400">
         {renderBackground()}
         
-        <div className="z-10 flex flex-col items-center">
+        <div style={{ zIndex: 10, display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', padding: '20px' }}>
            <div className="mb-8 relative">
               <Scan className="w-24 h-24 text-cyan-400 animate-spin-slow" />
            </div>
            
-           <h1 className="text-5xl md:text-7xl font-bold tracking-widest mb-2" style={{fontFamily: 'Orbitron'}}>BIO-SCAN</h1>
-           <p className="text-sm md:text-xl tracking-[0.5em] text-cyan-600 mb-12">生物特徵分析系統 V2.0</p>
+           <h1 className="text-4xl md:text-7xl font-bold tracking-widest mb-2 text-center" style={{fontFamily: 'Orbitron'}}>BIO-SCAN</h1>
+           <p className="text-xs md:text-xl tracking-[0.3em] text-cyan-600 mb-12 text-center">生物特徵分析系統 V2.1</p>
            
            <div className="border border-cyan-500/50 bg-slate-900/80 p-6 rounded-lg backdrop-blur-sm max-w-md w-full text-center mb-8">
               <p className="text-xs text-slate-400 mb-2">SYSTEM STATUS</p>
               <p className={`text-lg ${loadingError ? 'text-red-500' : 'text-emerald-400'} animate-pulse`}>{loadingStatus}</p>
+              {debugMsg && <p className="text-xs text-yellow-500 mt-2 font-mono">{debugMsg}</p>}
            </div>
 
            {loadingError ? (
-             <button onClick={() => initAI()} style={styles.button} className="hover:bg-cyan-500 hover:text-slate-900 transition-all">
+             <button onClick={() => initAI()} style={styles.button}>
                 <RefreshCw className="w-6 h-6" /> RETRY CONNECT
              </button>
            ) : (
-             <button onClick={startScanning} style={styles.button} className="hover:bg-cyan-500 hover:text-slate-900 transition-all">
+             <button onClick={startScanning} style={styles.button}>
                <Fingerprint className="w-6 h-6" /> START ANALYSIS
              </button>
            )}
@@ -299,7 +338,7 @@ export default function BioFutureScanApp() {
         height={720} 
       />
 
-      <div className="absolute inset-0 z-20 pointer-events-none p-4 md:p-8 flex flex-col justify-between" style={{ width: '100%', height: '100%' }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 20, pointerEvents: 'none', padding: '20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', boxSizing: 'border-box' }}>
          {/* Top Bar */}
          <div className="flex justify-between items-start w-full">
             <div className="flex flex-col gap-1">
@@ -307,10 +346,10 @@ export default function BioFutureScanApp() {
                   <Activity className="w-4 h-4" />
                   <span>LIVE FEED // ONLINE</span>
                </div>
-               <h2 className="text-2xl font-bold tracking-widest border-l-4 border-cyan-500 pl-3">BIO-METRICS</h2>
+               <h2 className="text-xl md:text-2xl font-bold tracking-widest border-l-4 border-cyan-500 pl-3">BIO-METRICS</h2>
             </div>
             <div className="text-right">
-               <div className="text-4xl font-bold" style={{fontFamily: 'Share Tech Mono'}}>
+               <div className="text-2xl md:text-4xl font-bold" style={{fontFamily: 'Share Tech Mono'}}>
                   {new Date().toLocaleTimeString('en-US', {hour12: false})}
                </div>
             </div>
@@ -327,9 +366,9 @@ export default function BioFutureScanApp() {
 
          {/* Bottom Data Panel */}
          {systemState === 'RESULT' ? (
-            <div className="bg-slate-900/90 border border-cyan-500 p-6 backdrop-blur-md w-full max-w-4xl mx-auto rounded-lg pointer-events-auto">
+            <div className="bg-slate-900/90 border border-cyan-500 p-6 backdrop-blur-md w-full max-w-4xl mx-auto rounded-lg pointer-events-auto" style={{pointerEvents: 'auto', marginBottom: '20px'}}>
                <div className="flex justify-between items-center mb-6 border-b border-cyan-800 pb-4">
-                  <h3 className="text-3xl font-bold text-white flex items-center gap-3">
+                  <h3 className="text-xl md:text-3xl font-bold text-white flex items-center gap-3">
                      <Brain className="text-fuchsia-500" /> 分析報告 COMPLETE
                   </h3>
                   <button onClick={() => { setSystemState('SCANNING'); setScanProgress(0); }} className="px-4 py-2 border border-cyan-600 text-sm text-cyan-400 hover:bg-cyan-900 transition-colors flex items-center gap-2">
@@ -352,14 +391,14 @@ export default function BioFutureScanApp() {
                      <div>
                         <div className="text-xs text-fuchsia-300 mb-1">BIOLOGICAL AGE</div>
                      </div>
-                     <div className="text-5xl font-bold" style={{fontFamily: 'Orbitron'}}>
+                     <div className="text-4xl md:text-5xl font-bold" style={{fontFamily: 'Orbitron'}}>
                         {metrics.age}<span className="text-lg text-fuchsia-500 ml-1">YR</span>
                      </div>
                   </div>
                </div>
             </div>
          ) : (
-            <div className="w-full">
+            <div className="w-full" style={{ marginBottom: '20px' }}>
                <div className="text-xs text-cyan-600">PROGRESS</div>
                <div className="h-2 bg-slate-800 mt-2 overflow-hidden w-full">
                   <div className="h-full bg-cyan-500" style={{width: `${scanProgress}%`}}></div>
