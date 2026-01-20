@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Scan, Activity, Brain, RefreshCw, Fingerprint, Crosshair, Smile, User, Dna, Microscope, Box, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Music, Eye, Hash } from 'lucide-react';
 
-// BioFuture Scan - v10.1 亞洲神顏校準版
-// 1. [男性標準] 0 分基準改為 Jeffrey Ngai (魏俊笙)：強調亞洲立體感、大眼與少年感下顎
-// 2. [女性標準] 保持 Blackpink 標準：短中庭、幼態比例
-// 3. [器官分析] 針對亞洲人臉型調整眼、鼻評分權重，移除歐美過高鼻樑的標準
-// 4. [測試對象] 全亞洲人臉資料庫模型校準
+// BioFuture Scan - v10.3 廣域評分校準版
+// 1. [評分曲線] 調整係數為 35，確保結構偏差較大者(醜)能落在 6.5 - 9.9 分區間
+// 2. [一般人] 維持普通人約 4.5 - 6.0 分
+// 3. [神顏] 維持 Jeffrey/Blackpink 等級在 0 - 2.8 分
 
 const MP_VERSION = '0.4.1633559619'; 
 
@@ -32,7 +31,6 @@ export default function BioFutureScanApp() {
   const [loadingStatus, setLoadingStatus] = useState("SYSTEM STANDBY");
   const [instruction, setInstruction] = useState("");
   
-  // 核心數據 - 擴充版
   const [metrics, setMetrics] = useState({
     deviationScore: 0, 
     age: 0, 
@@ -56,7 +54,6 @@ export default function BioFutureScanApp() {
   
   const stateRef = useRef('IDLE'); 
   
-  // 數據緩衝區
   const analysisBuffer = useRef({
     scores: [],
     ages: [],
@@ -93,7 +90,7 @@ export default function BioFutureScanApp() {
       document.head.appendChild(script);
     }
 
-    addLog("Asian Idol Database Loaded.");
+    addLog("Bio-Metric Engine v10.3 Ready.");
     initAI();
 
     return () => stopCamera(); 
@@ -284,61 +281,58 @@ export default function BioFutureScanApp() {
       return { yaw, pitch };
   };
 
-  // --- 🌟 亞洲神顏評分模型 (Asian Idol Standard) ---
+  // --- 🌟 評分模型校正 (v10.3 Wide Range) ---
   const calculateBiometrics = (landmarks) => {
       // 1. 臉型長寬比 (Golden Ratio) 
-      // 亞洲人臉型較寬，理想值調整為 1.55 (Blackpink / Jeffrey 比例)
       const faceHeight = getDistance3D(landmarks[10], landmarks[152]);
       const faceWidth = getDistance3D(landmarks[234], landmarks[454]);
       const ratio = faceHeight / faceWidth;
       const goldenDev = Math.abs(ratio - 1.55) / 1.55;
 
-      // 2. 中下庭比例 (幼態感關鍵)
-      // 中庭(9-2) 與 下庭(2-152) 接近 1:1 或 中庭略短 (0.95)
+      // 2. 中下庭比例 (重要)
       const middleThird = getDistance3D(landmarks[9], landmarks[2]);
       const lowerThird = getDistance3D(landmarks[2], landmarks[152]);
       const midLowRatio = middleThird / lowerThird;
-      const midLowDev = Math.abs(midLowRatio - 0.95);
+      const midLowDev = Math.abs(midLowRatio - 1.0); 
 
-      // 3. 對稱性 (亞洲人對對稱性要求極高)
+      // 3. 對稱性
       const leftDist = getDistance3D(landmarks[234], landmarks[1]);
       const rightDist = getDistance3D(landmarks[454], landmarks[1]);
       const symmetryVal = Math.min(leftDist, rightDist) / Math.max(leftDist, rightDist);
       const symmetryDev = 1 - symmetryVal;
 
-      // 4. [亞洲標準] 眼部大小分析 (Eye Ratio)
-      // 亞洲人臉寬較大，眼寬/臉寬 > 0.225 即為頂級大眼 (Jeffrey / Lisa)
-      // 一般人約 0.2，歐美標準可能要 0.25
+      // 4. 眼部大小
       const leftEyeW = getDistance3D(landmarks[33], landmarks[133]);
       const rightEyeW = getDistance3D(landmarks[362], landmarks[263]);
       const avgEyeW = (leftEyeW + rightEyeW) / 2;
       const eyeRatio = avgEyeW / faceWidth;
-      const eyeDev = Math.max(0, 0.225 - eyeRatio) * 5; 
+      const eyeDev = Math.max(0, 0.22 - eyeRatio) * 3; 
 
-      // 5. [亞洲標準] 鼻型結構分析 (Nose Structure)
-      // 鼻寬: 鼻翼/臉寬 理想約 0.25
+      // 5. 鼻型結構
       const noseW = getDistance3D(landmarks[49], landmarks[279]);
       const noseRatio = noseW / faceWidth; 
-      const noseWidthDev = Math.abs(noseRatio - 0.25) * 10;
+      const noseWidthDev = Math.abs(noseRatio - 0.25) * 5;
 
-      // 鼻高: 移除歐美 Beckham 標準
-      // Jeffrey Ngai 的鼻子立體但不過於突兀。Z軸差約 0.055 - 0.065 為完美區間
       const avgCheekZ = (landmarks[234].z + landmarks[454].z) / 2;
       const noseZ = landmarks[1].z;
       const noseHeightMetric = Math.abs(avgCheekZ - noseZ); 
-      // 偏差計算：偏離 0.06 越多扣分越多
       const noseHeightScore = noseHeightMetric * 100;
-      const noseHeightDev = Math.abs(noseHeightMetric - 0.06) * 15; 
 
-      // 6. 綜合評分
-      // 權重分配: 對稱(30%) + 中庭(25%) + 黃金比(15%) + 眼(15%) + 鼻(15%)
-      const totalDev = (goldenDev * 0.15) + (midLowDev * 0.25) + (symmetryDev * 0.3) + (eyeDev * 0.15) + (noseHeightDev * 0.15);
+      // 6. 綜合評分公式 (廣域版)
+      const totalDev = (goldenDev * 0.3) + (midLowDev * 0.3) + (symmetryDev * 0.4) + (eyeDev * 0.1) + (noseWidthDev * 0.1);
       
-      let rawScore = totalDev * 30;
+      // [關鍵調整] 係數提升至 35，拉大分數差距
+      // 普通人 Dev 約 0.12 -> 0.12 * 35 = 4.2 + 1 = 5.2 分
+      // 醜 (結構偏差) Dev 約 0.20 -> 0.20 * 35 = 7.0 + 1 = 8.0 分
+      // 神顏 Dev 約 0.03 -> 0.03 * 35 = 1.05 + 1 = 2.05 分
+      let rawScore = (totalDev * 35) + 1.0;
       
-      // 獎勵機制：如果符合 Jeffrey/Lisa 特徵 (短中庭+大眼)
-      if (midLowRatio < 1.0 && eyeRatio > 0.21) rawScore *= 0.7; 
+      // 神顏獎勵 (微調)
+      if (midLowRatio < 1.05 && midLowRatio > 0.95 && symmetryVal > 0.97) {
+          rawScore *= 0.8;
+      }
 
+      // 確保範圍
       rawScore = Math.min(9.9, Math.max(0.1, rawScore));
 
       // 性別與年齡
@@ -350,7 +344,7 @@ export default function BioFutureScanApp() {
       const leftEyeTilt = landmarks[33].y - landmarks[133].y; 
       const rightEyeTilt = landmarks[263].y - landmarks[362].y;
       const eyeSag = (leftEyeTilt + rightEyeTilt) * 50; 
-      let bioAge = 20 + (Math.max(0, eyeSag) * 200) + (rawScore * 1.8); 
+      let bioAge = 20 + (Math.max(0, eyeSag) * 200) + (rawScore * 1.5); 
       bioAge = Math.min(85, Math.max(16, bioAge)); 
 
       return {
@@ -365,7 +359,6 @@ export default function BioFutureScanApp() {
   };
 
   const calculateSmileEsthetics = (landmarks) => {
-      // 牙齒/笑容美觀度
       const mouthW = getDistance3D(landmarks[61], landmarks[291]);
       const faceW = getDistance3D(landmarks[234], landmarks[454]);
       const widthRatio = mouthW / faceW; 
@@ -407,31 +400,27 @@ export default function BioFutureScanApp() {
       
       const avgEye = buffer.eyeRatios.reduce((a, b) => a + b, 0) / buffer.eyeRatios.length;
       const avgNoseH = buffer.noseHeights.reduce((a, b) => a + b, 0) / buffer.noseHeights.length;
-      const avgNoseW = buffer.noseWidths.reduce((a, b) => a + b, 0) / buffer.noseWidths.length;
-      
       const avgSmile = buffer.smileScores.length > 0 
           ? buffer.smileScores.reduce((a, b) => a + b, 0) / buffer.smileScores.length 
           : 5;
 
       const genderStr = avgGender > 0.55 ? "MALE" : "FEMALE";
       
+      // 最終微調
       if (avgSmile > 8) avgScore -= 0.5; 
       
-      // 鼻高太高或太低都不好 (追求 Jeffrey 的適中立體感 6.0)
-      if (avgNoseH > 5.5 && avgNoseH < 7.5) avgScore -= 0.3; 
-
       let finalScore = Math.max(0.1, avgScore).toFixed(1);
 
-      // 文字描述轉換 (Asian Standards)
+      // 文字描述
       const eyeStr = avgEye > 0.225 ? "LARGE (IDOL)" : (avgEye > 0.19 ? "MEDIUM" : "SMALL");
-      const noseStr = (avgNoseH > 5.5 && avgNoseH < 7.5) ? "IDEAL ASIAN BRIDGE" : (avgNoseH >= 7.5 ? "HIGH (WESTERN)" : "FLAT");
+      const noseStr = (avgNoseH > 5.5 && avgNoseH < 7.5) ? "IDEAL ASIAN BRIDGE" : "STANDARD";
       const teethStr = avgSmile > 8 ? "PERFECT SMILE" : (avgSmile > 5 ? "NATURAL" : "CONCEALED");
 
       let rank = "AVERAGE";
-      if (finalScore <= 2.0) rank = "IDOL TIER (JEFFREY/BP LEVEL)";     
-      else if (finalScore <= 4.0) rank = "TOP TIER (MODEL)"; 
-      else if (finalScore <= 6.5) rank = "STANDARD (NORMAL)";    
-      else if (finalScore <= 8.5) rank = "DEVIATED";  
+      if (finalScore <= 2.8) rank = "IDOL TIER (JEFFREY/BP LEVEL)";     
+      else if (finalScore <= 4.8) rank = "TOP TIER (MODEL)"; 
+      else if (finalScore <= 6.8) rank = "STANDARD (NORMAL)";    
+      else if (finalScore <= 8.8) rank = "DEVIATED";  
       else rank = "EXTREME";
 
       setMetrics({
@@ -458,28 +447,26 @@ export default function BioFutureScanApp() {
     if (results.multiFaceLandmarks) {
       for (const landmarks of results.multiFaceLandmarks) {
         
-        ctx.lineWidth = 1;
-
-        // --- 3D 地形圖 (Topo-Map) ---
-        TESSELATION_CONNECTIONS.forEach(([start, end]) => {
-            const p1 = landmarks[start];
-            const p2 = landmarks[end];
-            const zAvg = (p1.z + p2.z) / 2; 
-            const brightness = Math.max(20, 100 - (zAvg + 0.1) * 400); 
+        // 光點視覺
+        for (let i = 0; i < landmarks.length; i+=4) { 
+            const pt = landmarks[i];
+            const x = pt.x * width;
+            const y = pt.y * height;
+            const zNorm = (pt.z + 0.1) * 5; 
+            const alpha = Math.max(0.2, 1 - zNorm); 
             
-            ctx.strokeStyle = `hsl(180, 100%, ${brightness}%)`; 
+            ctx.fillStyle = `rgba(6, 182, 212, ${alpha})`; 
             ctx.beginPath();
-            ctx.moveTo(p1.x * width, p1.y * height);
-            ctx.lineTo(p2.x * width, p2.y * height);
-            ctx.stroke();
-        });
+            ctx.arc(x, y, 1.2, 0, 2 * Math.PI); 
+            ctx.fill();
+        }
 
-        // 關鍵點加強
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-        [1, 10, 152, 234, 454, 13, 14].forEach(idx => {
+        const keyPoints = [1, 4, 6, 33, 133, 362, 263, 61, 291];
+        keyPoints.forEach(idx => {
             const pt = landmarks[idx];
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.9)'; 
             ctx.beginPath();
-            ctx.arc(pt.x * width, pt.y * height, 2, 0, 2 * Math.PI);
+            ctx.arc(pt.x * width, pt.y * height, 3, 0, 2 * Math.PI);
             ctx.fill();
         });
 
@@ -487,7 +474,6 @@ export default function BioFutureScanApp() {
         const pose = detectHeadPose(landmarks);
         const bio = calculateBiometrics(landmarks);
         
-        // 採樣數據
         if (['SCAN_CENTER', 'SCAN_LEFT', 'SCAN_RIGHT', 'SCAN_UP', 'SCAN_DOWN'].includes(stateRef.current)) {
              analysisBuffer.current.scores.push(bio.score);
              analysisBuffer.current.ages.push(bio.age);
@@ -580,7 +566,7 @@ export default function BioFutureScanApp() {
             }
         }
 
-        // 微笑測試 (含牙齒分析)
+        // 微笑測試
         if (stateRef.current === 'WAITING_SMILE') {
             const smileGrade = calculateSmileEsthetics(landmarks);
             if (smileGrade > 4) {
@@ -663,7 +649,7 @@ export default function BioFutureScanApp() {
               <Box className={`w-24 h-24 text-cyan-400 ${systemState === 'STARTING' ? 'animate-spin' : ''}`} />
            </div>
            <h1 className="text-4xl font-bold tracking-widest mb-2 text-center">3D OMNI-SCAN</h1>
-           <p className="text-sm tracking-widest text-cyan-600 mb-8">醫美級生物掃描 v10.1</p>
+           <p className="text-sm tracking-widest text-cyan-600 mb-8">醫美級生物掃描 v10.3</p>
            
            {systemState === 'STARTING' ? (
                <div className="text-emerald-400 animate-pulse text-xl">{loadingStatus}</div>
@@ -686,7 +672,6 @@ export default function BioFutureScanApp() {
                            <span className="tracking-widest font-bold">ASIAN AESTHETICS REPORT</span>
                        </div>
                        
-                       {/* 綜合數據面板 */}
                        <div className="grid grid-cols-2 gap-2 w-full max-w-lg text-center mb-4">
                            <div className="bg-slate-800/50 p-2 rounded flex flex-col justify-center">
                                <div className="text-[10px] text-slate-400">GENDER / AGE</div>
@@ -697,7 +682,6 @@ export default function BioFutureScanApp() {
                                <div className="text-lg font-bold text-white font-mono">{metrics.symmetry}</div>
                            </div>
                            
-                           {/* 新增特徵面板 */}
                            <div className="bg-slate-800/50 p-2 rounded flex flex-col justify-center">
                                <div className="text-[10px] text-slate-400 flex items-center justify-center gap-1"><Eye size={10}/> EYE SIZE</div>
                                <div className="text-sm font-bold text-cyan-300 font-mono">{metrics.eyeSize}</div>
