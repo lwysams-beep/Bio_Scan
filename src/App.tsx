@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Scan, Activity, Zap, Clock, Brain, RefreshCw, Camera, Fingerprint, ShieldAlert, Cpu, Loader2 } from 'lucide-react';
 
-// BioFuture Scan - v2.2 iOS 強制驅動版
-// 1. [修復] 按鈕無效：點擊後立即切換 UI 狀態，不再被動等待事件
-// 2. [修復] 畫面沒跳轉：改用 oncanplay 事件並強制 video.play()，確保 iOS 影片流暢動
-// 3. [優化] AI 非同步啟動：先顯示相機，AI 準備好後再疊加，避免卡頓感
+// BioFuture Scan - v2.3 iOS 強制啟動終極版
+// 1. [修復] 卡在 Initializing: 加入 SetTimeout 強制播放機制，不再單純依賴事件監聽
+// 2. [優化] 增加詳細的 Debug 狀態顯示，讓用戶知道目前卡在哪一步
+// 3. [強化] 確保 Video 屬性 (autoplay, muted, playsinline) 完整，符合 iOS 規範
 
 const MP_VERSION = '0.4.1633559619'; 
 
@@ -12,14 +12,13 @@ export default function BioFutureScanApp() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   
-  // 狀態管理: IDLE (首頁) -> STARTING (啟動中) -> SCANNING (掃描中) -> ANALYZING (分析中) -> RESULT (結果)
+  // 狀態管理
   const [systemState, setSystemState] = useState('IDLE'); 
   const [loadingStatus, setLoadingStatus] = useState("SYSTEM INITIALIZING...");
   const [loadingError, setLoadingError] = useState(null);
   const [scanProgress, setScanProgress] = useState(0);
   const [debugMsg, setDebugMsg] = useState(""); 
   
-  // 分析結果
   const [metrics, setMetrics] = useState({
     stress: 0, age: 0, heartRate: 0, fatigue: 0
   });
@@ -30,7 +29,6 @@ export default function BioFutureScanApp() {
 
   // --- 1. 初始化設定 ---
   useEffect(() => {
-    // 強制重置網頁邊距，解決白邊問題
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflowX = 'hidden';
@@ -114,11 +112,10 @@ export default function BioFutureScanApp() {
     }));
   };
 
-  // --- 4. 相機啟動邏輯 (iOS 核心修復) ---
+  // --- 4. 相機啟動邏輯 (v2.3 強制啟動版) ---
   const startScanning = async () => {
-    // 立即切換狀態，給用戶反饋，避免按鈕看起來沒反應
     setSystemState('STARTING'); 
-    setDebugMsg("Initializing Camera...");
+    setDebugMsg("Requesting Access...");
     
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert("您的瀏覽器不支援相機功能，請使用 Safari。");
@@ -139,27 +136,43 @@ export default function BioFutureScanApp() {
       setDebugMsg("Stream Acquired");
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        // iOS 關鍵：加上 playsInline 並明確調用 load
-        videoRef.current.setAttribute('playsinline', 'true'); 
+        const video = videoRef.current;
+        video.srcObject = stream;
+        // iOS 必備屬性三劍客
+        video.setAttribute('playsinline', 'true'); 
+        video.setAttribute('autoplay', 'true');
+        video.muted = true;
         
-        // 使用 oncanplay 而不是 onloadedmetadata，這在 iOS 上更可靠
-        videoRef.current.oncanplay = async () => {
-            setDebugMsg("Video Can Play");
+        // 定義播放邏輯
+        const attemptPlay = async () => {
             try {
-                await videoRef.current.play();
+                setDebugMsg("Attempting Play...");
+                await video.play();
                 setDebugMsg("Video Playing");
                 
-                // 影片開始播放後，正式進入掃描介面
+                // 只要影片開始跑，就切換狀態
                 setSystemState('SCANNING');
-                
-                // 啟動 AI (非同步執行，不阻擋畫面)
                 startAI();
             } catch(e) {
-                setDebugMsg("Play Failed: " + e.message);
+                setDebugMsg("Play Error: " + e.name);
                 console.error(e);
+                // 如果是 NotAllowedError，代表需要再次手動觸發，這裡我們保持在 STARTING 狀態讓用戶知道
             }
         };
+
+        // 策略 A: 監聽事件
+        video.onloadedmetadata = () => {
+            setDebugMsg("Metadata Loaded");
+            attemptPlay();
+        };
+
+        // 策略 B: 強制倒數 (防止事件不觸發)
+        setTimeout(() => {
+            if (video.paused) {
+                setDebugMsg("Force Starting...");
+                attemptPlay();
+            }
+        }, 1000);
       }
     } catch (e) {
       setDebugMsg("Error: " + e.message);
@@ -171,7 +184,7 @@ export default function BioFutureScanApp() {
   const startAI = async () => {
     if (!window.FaceMesh) {
         setDebugMsg("Waiting for AI...");
-        return; // 如果 AI 還沒下載完，這裡先跳過，等下一次循環
+        return; 
     }
 
     if (!faceMeshRef.current) {
@@ -188,7 +201,6 @@ export default function BioFutureScanApp() {
         faceMesh.onResults(onResults);
         faceMeshRef.current = faceMesh;
         
-        // 啟動偵測迴圈
         isLooping.current = true;
         processFrame();
     }
@@ -225,13 +237,8 @@ export default function BioFutureScanApp() {
             ctx.fill();
         }
 
-        // 這裡需要再次檢查狀態，因為 AI 回調是異步的
         setScanProgress(prev => {
-            if (prev >= 100) {
-                // 不要在這裡直接改變 systemState，避免 React 渲染衝突
-                // 我們讓進度條滿了之後，由 useEffect 或其他邏輯來觸發結果
-                return 100;
-            }
+            if (prev >= 100) return 100;
             analyzeFace(landmarks);
             return prev + 0.5;
         });
@@ -240,7 +247,6 @@ export default function BioFutureScanApp() {
     ctx.restore();
   };
 
-  // 監聽進度條，滿 100% 切換狀態
   useEffect(() => {
       if (scanProgress >= 100 && systemState === 'SCANNING') {
           setSystemState('ANALYZING');
@@ -288,7 +294,7 @@ export default function BioFutureScanApp() {
       touchAction: 'manipulation', 
       borderRadius: '4px',
       boxShadow: '0 0 15px rgba(6, 182, 212, 0.3)',
-      width: '80%', // 手機版按鈕寬度
+      width: '80%', 
       maxWidth: '300px'
     }
   };
@@ -315,19 +321,20 @@ export default function BioFutureScanApp() {
            </div>
            
            <h1 className="text-4xl md:text-7xl font-bold tracking-widest mb-2 text-center" style={{fontFamily: 'Orbitron'}}>BIO-SCAN</h1>
-           <p className="text-xs md:text-xl tracking-[0.3em] text-cyan-600 mb-12 text-center">生物特徵分析系統 V2.2</p>
+           <p className="text-xs md:text-xl tracking-[0.3em] text-cyan-600 mb-12 text-center">生物特徵分析系統 V2.3</p>
            
            <div className="border border-cyan-500/50 bg-slate-900/80 p-6 rounded-lg backdrop-blur-sm max-w-md w-full text-center mb-8">
               <p className="text-xs text-slate-400 mb-2">SYSTEM STATUS</p>
               <p className={`text-lg ${loadingError ? 'text-red-500' : 'text-emerald-400'} animate-pulse`}>
                   {systemState === 'STARTING' ? "INITIALIZING CAMERA..." : loadingStatus}
               </p>
-              {debugMsg && <p className="text-xs text-yellow-500 mt-2 font-mono">{debugMsg}</p>}
+              {/* 這裡會顯示詳細的除錯訊息，讓你知道卡在哪 */}
+              {debugMsg && <p className="text-xs text-yellow-500 mt-2 font-mono border-t border-slate-700 pt-2">{debugMsg}</p>}
            </div>
 
            {systemState === 'STARTING' ? (
               <button disabled style={{...styles.button, opacity: 0.7}}>
-                 <Loader2 className="w-6 h-6 animate-spin" /> CONNECTING...
+                 <Loader2 className="w-6 h-6 animate-spin" /> LOADING...
               </button>
            ) : loadingError ? (
              <button onClick={() => initAI()} style={styles.button}>
@@ -351,6 +358,7 @@ export default function BioFutureScanApp() {
         style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', opacity: 0.6 }} 
         playsInline 
         muted 
+        autoPlay // 強制自動播放
       />
       <canvas 
         ref={canvasRef} 
