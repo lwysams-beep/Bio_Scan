@@ -20,9 +20,11 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true
+    "noFallthroughCasesInSwitch": true
+    
+    /* 如果你的 TypeScript 版本 < 5.8，請移除下面這兩行 */
+    // "erasableSyntaxOnly": true,
+    // "noUncheckedSideEffectImports": true
   },
   "include": ["src"]
 }
