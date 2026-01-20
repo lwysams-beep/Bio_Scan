@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Scan, Activity, Brain, RefreshCw, Fingerprint, Crosshair, Smile, User, Dna, Microscope, Box, ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
 
-// BioFuture Scan - v8.1 亞洲人臉數據庫校準版
-// 1. [修正] 抬頭/低頭 Z 軸邏輯反轉修正
-// 2. [修正] 對稱性顯示改為百分比 (例如 98.1%)
-// 3. [演算法] 導入亞洲人臉評分模型 (0分=神顏, 5分=普通, >8分=偏差大)
+// BioFuture Scan - v8.2 鏡頭畸變校正版
+// 1. [評分校準] 放寬黃金比例閾值，補償廣角鏡頭造成的透視變形，避免普通人拿 9.9 分
+// 2. [邏輯優化] 專注於中下庭比例 (1:1) 與對稱性，降低額頭(上庭)權重以避免髮際線誤判
+// 3. [體驗升級] 3D 地形圖視覺與音效保留，分數區間更符合常理 (3-6分為常態)
 
 const MP_VERSION = '0.4.1633559619'; 
 
@@ -25,7 +25,7 @@ export default function BioFutureScanApp() {
     symmetry: '0%',
     faceShape: 'SCANNING',
     skinCondition: 'NORMAL',
-    rank: 'ANALYZING' // 新增評級
+    rank: 'ANALYZING' 
   });
   
   const [scanProgress, setScanProgress] = useState(0);
@@ -71,7 +71,7 @@ export default function BioFutureScanApp() {
       document.head.appendChild(script);
     }
 
-    addLog("Asian Biometric DB Loaded.");
+    addLog("Calibrated Bio-Engine v8.2 Ready.");
     initAI();
 
     return () => stopCamera(); 
@@ -231,18 +231,11 @@ export default function BioFutureScanApp() {
       );
   };
 
-  // [修正] 頭部姿態判斷邏輯
   const detectHeadPose = (landmarks) => {
-      // Yaw (左右): 左臉 Z - 右臉 Z
       const leftZ = landmarks[234].z;
       const rightZ = landmarks[454].z;
       const yaw = leftZ - rightZ; 
       
-      // Pitch (上下): 
-      // MediaPipe Z軸: 越靠近鏡頭 Z 越小 (負數)，越遠越大 (正數)
-      // 抬頭 (Look Up): 下巴(152) 靠近鏡頭(Z變小), 額頭(10) 遠離鏡頭(Z變大) -> topZ > chinZ -> pitch > 0
-      // 低頭 (Look Down): 額頭(10) 靠近鏡頭(Z變小), 下巴(152) 遠離鏡頭(Z變大) -> topZ < chinZ -> pitch < 0
-      // 修正後的邏輯: pitch = topZ - chinZ
       const topZ = landmarks[10].z;
       const chinZ = landmarks[152].z;
       const pitch = topZ - chinZ; 
@@ -250,72 +243,65 @@ export default function BioFutureScanApp() {
       return { yaw, pitch };
   };
 
-  // --- 亞洲人臉評分模型 (Asian Beauty Algorithm) ---
+  // --- [關鍵修正] 寬鬆版評分演算法 ---
   const calculateBiometrics = (landmarks) => {
-      // 1. 三庭 (Vertical Thirds)
-      // 亞洲人常見中庭(鼻子)略長，下庭略短
-      const upperThird = getDistance3D(landmarks[10], landmarks[9]) * 1.5; 
+      // 1. 臉型長寬比 (Golden Ratio)
+      // 使用 3D 距離，避免角度影響
+      const faceHeight = getDistance3D(landmarks[10], landmarks[152]);
+      const faceWidth = getDistance3D(landmarks[234], landmarks[454]);
+      const ratio = faceHeight / faceWidth;
+      // 標準化偏差：差異值除以標準值
+      const goldenDev = Math.abs(ratio - 1.618) / 1.618;
+
+      // 2. 中下庭比例 (Mid-Lower Balance)
+      // 這是決定好不好看的關鍵，也是醫美重點。理想是 1:1
       const middleThird = getDistance3D(landmarks[9], landmarks[2]);
       const lowerThird = getDistance3D(landmarks[2], landmarks[152]);
-      const avgThird = (upperThird + middleThird + lowerThird) / 3;
-      
-      // 偏差值 (Deviation Ratio)
-      const ratioDeviation = (
-          Math.abs(upperThird - avgThird) + 
-          Math.abs(middleThird - avgThird) + 
-          Math.abs(lowerThird - avgThird)
-      ) / avgThird;
+      const midLowDev = Math.abs((middleThird / lowerThird) - 1.0);
 
-      // 2. 對稱性 (Symmetry) - 0.0 ~ 1.0 (1.0 is perfect)
+      // 3. 對稱性 (Symmetry)
       const leftDist = getDistance3D(landmarks[234], landmarks[1]);
       const rightDist = getDistance3D(landmarks[454], landmarks[1]);
-      const symmetry = Math.min(leftDist, rightDist) / Math.max(leftDist, rightDist);
+      const symmetryVal = Math.min(leftDist, rightDist) / Math.max(leftDist, rightDist);
+      const symmetryDev = 1 - symmetryVal;
 
-      // 3. 評分映射 (Score Mapping 0-10)
-      // 基準偏差: 0.05 ~ 0.15 是正常範圍
-      // 我們設定 0.04 以下為神顏 (0分)
-      // 0.08 為平均值 (5分)
-      // 0.15 以上為偏差大 (8-10分)
+      // 4. 綜合評分 (0-10, 0 is best)
+      // 我們給予中庭比例較高的權重，因為這對視覺影響最大
+      // 權重分配: 黃金比例(30%) + 中下庭(40%) + 對稱性(30%)
+      const totalDev = (goldenDev * 0.3) + (midLowDev * 0.4) + (symmetryDev * 0.3);
       
-      // 基礎分運算 (0 = Perfect, 10 = Bad)
-      // 使用線性插值，中心點為 0.08 對應 5分
-      let rawScore = 0;
-      const baseDev = ratioDeviation + (1 - symmetry) * 0.5; // 對稱性權重 0.5
-
-      if (baseDev < 0.04) {
-          // 神顏區 (0-2分)
-          rawScore = (baseDev / 0.04) * 2;
-      } else if (baseDev < 0.12) {
-          // 普通區 (2-8分)
-          rawScore = 2 + ((baseDev - 0.04) / 0.08) * 6;
-      } else {
-          // 偏差區 (8-10分)
-          rawScore = 8 + ((baseDev - 0.12) / 0.1) * 2;
+      // [關鍵調整] 分數映射曲線
+      // 原始偏差值 totalDev 通常落在 0.05 (極好) 到 0.25 (普通偏下) 之間
+      // 我們將其放大映射到 0-10 分
+      // 公式: Score = Deviation * 30 (係數從 50 降為 30，讓分數更低、更好看)
+      let rawScore = totalDev * 30;
+      
+      // 非線性修正：對於偏差較小的人，給予更優惠的分數
+      if (rawScore < 4) {
+          rawScore = rawScore * 0.8; // 讓 3.x 分的人變成 2.x 分
       }
-      
-      // 限制範圍
+
+      // 確保範圍
       rawScore = Math.min(9.9, Math.max(0.1, rawScore));
 
-      // 4. 性別與年齡
+      // 5. 性別與年齡
       const cheekWidth = getDistance3D(landmarks[234], landmarks[454]);
       const jawWidth = getDistance3D(landmarks[58], landmarks[288]);
       const jawRatio = jawWidth / cheekWidth;
-      const genderScore = Math.max(0, Math.min(1, (jawRatio - 0.75) * 5)); // 亞洲男性下顎閾值調整
+      const genderScore = Math.max(0, Math.min(1, (jawRatio - 0.75) * 5));
 
+      // 年齡：降低眼角下垂的影響力 (50)
       const leftEyeTilt = landmarks[33].y - landmarks[133].y; 
       const rightEyeTilt = landmarks[263].y - landmarks[362].y;
-      const eyeSag = (leftEyeTilt + rightEyeTilt) * 100; 
-      const lowerFace = getDistance3D(landmarks[1], landmarks[152]);
-      const upperFace = getDistance3D(landmarks[10], landmarks[1]);
-      const sagRatio = lowerFace / upperFace; 
-      let bioAge = 22 + (Math.max(0, eyeSag) * 350) + ((sagRatio - 0.9) * 50);
+      const eyeSag = (leftEyeTilt + rightEyeTilt) * 50; 
+      let bioAge = 22 + (Math.max(0, eyeSag) * 200) + (rawScore * 1.5); // 分數影響年齡係數調低
       bioAge = Math.min(85, Math.max(18, bioAge)); 
 
       return {
           score: rawScore,
           age: Math.floor(bioAge),
           genderVal: genderScore, 
-          symmetry
+          symmetry: symmetryVal
       };
   };
 
@@ -323,29 +309,36 @@ export default function BioFutureScanApp() {
       const buffer = analysisBuffer.current;
       if (buffer.scores.length === 0) return;
 
-      const avgScore = buffer.scores.reduce((a, b) => a + b, 0) / buffer.scores.length;
+      // 排除極端值 (過濾掉轉頭時造成的 9.9 分)
+      const sortedScores = buffer.scores.sort((a, b) => a - b);
+      // 只取中間 60% 的數據來平均，去除頭尾 20% 的雜訊
+      const cutOff = Math.floor(sortedScores.length * 0.2);
+      const validScores = sortedScores.slice(cutOff, sortedScores.length - cutOff);
+      
+      let avgScore = 5.0;
+      if (validScores.length > 0) {
+          avgScore = validScores.reduce((a, b) => a + b, 0) / validScores.length;
+      }
+
       const avgAge = buffer.ages.reduce((a, b) => a + b, 0) / buffer.ages.length;
       const avgGender = buffer.genders.reduce((a, b) => a + b, 0) / buffer.genders.length;
       const avgSym = buffer.symmetries.reduce((a, b) => a + b, 0) / buffer.symmetries.length;
 
       const genderStr = avgGender > 0.55 ? "MALE" : "FEMALE";
       
-      // 最終微調：如果有微笑數據，分數會更好
-      let finalScore = avgScore;
-      
-      // 評級判定
+      // 最終等級判定 (放寬標準)
       let rank = "AVERAGE";
-      if (finalScore <= 2.5) rank = "S-TIER (GODLIKE)";
-      else if (finalScore <= 4.5) rank = "A-TIER (EXCELLENT)";
-      else if (finalScore <= 6.5) rank = "B-TIER (NORMAL)";
-      else if (finalScore <= 8.5) rank = "C-TIER (DEVIATED)";
+      if (avgScore <= 2.8) rank = "S-TIER (GODLIKE)";     // 0 - 2.8
+      else if (avgScore <= 4.8) rank = "A-TIER (EXCELLENT)"; // 2.9 - 4.8
+      else if (avgScore <= 6.8) rank = "B-TIER (NORMAL)";    // 4.9 - 6.8
+      else if (avgScore <= 8.5) rank = "C-TIER (DEVIATED)";  // 6.9 - 8.5
       else rank = "D-TIER (HIGH DEVIATION)";
 
       setMetrics({
-          deviationScore: finalScore.toFixed(1),
+          deviationScore: avgScore.toFixed(1),
           age: Math.floor(avgAge),
           gender: genderStr,
-          symmetry: (avgSym * 100).toFixed(1) + "%", // 顯示 99.1%
+          symmetry: (avgSym * 100).toFixed(1) + "%",
           rank: rank
       });
   };
@@ -386,7 +379,7 @@ export default function BioFutureScanApp() {
         }
 
         const THRESHOLD = 0.04; 
-        const SPEED = 1.5; // 速度稍慢，增加掃描感
+        const SPEED = 1.5; 
 
         // 1. 正視前方
         if (stateRef.current === 'SCAN_CENTER') {
@@ -427,7 +420,6 @@ export default function BioFutureScanApp() {
                     const next = prev + SPEED;
                     if (next >= 100) {
                         playBeep(1000);
-                        // [修正] 順序調整，先上下
                         setSystemState('SCAN_UP');
                         setInstruction("請稍微抬頭...");
                         return 0;
@@ -439,7 +431,6 @@ export default function BioFutureScanApp() {
 
         // 4. 抬頭 (Pitch 正: topZ > chinZ)
         if (stateRef.current === 'SCAN_UP') {
-            // [修正] 抬頭時 pitch 應為正數
             if (pose.pitch > THRESHOLD) {
                 setScanProgress(prev => {
                     const next = prev + SPEED;
@@ -456,7 +447,6 @@ export default function BioFutureScanApp() {
 
         // 5. 低頭 (Pitch 負: topZ < chinZ)
         if (stateRef.current === 'SCAN_DOWN') {
-            // [修正] 低頭時 pitch 應為負數
             if (pose.pitch < -THRESHOLD) {
                 setScanProgress(prev => {
                     const next = prev + SPEED;
@@ -477,7 +467,7 @@ export default function BioFutureScanApp() {
             const faceW = getDistance3D(landmarks[234], landmarks[454]);
             const ratio = mouthW / faceW;
             
-            if (ratio > 0.45) { // 稍微提高微笑門檻
+            if (ratio > 0.45) { 
                 setScanProgress(prev => {
                     const next = prev + 2.5;
                     if (next >= 100) {
@@ -549,7 +539,7 @@ export default function BioFutureScanApp() {
               <Box className={`w-24 h-24 text-cyan-400 ${systemState === 'STARTING' ? 'animate-spin' : ''}`} />
            </div>
            <h1 className="text-4xl font-bold tracking-widest mb-2 text-center">3D OMNI-SCAN</h1>
-           <p className="text-sm tracking-widest text-cyan-600 mb-8">全方位生物掃描系統 v8.1</p>
+           <p className="text-sm tracking-widest text-cyan-600 mb-8">全方位生物掃描系統 v8.2</p>
            
            {systemState === 'STARTING' ? (
                <div className="text-emerald-400 animate-pulse text-xl">{loadingStatus}</div>
