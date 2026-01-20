@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Scan, Activity, Zap, Clock, Brain, RefreshCw, Camera, Fingerprint, ShieldAlert, Cpu, Loader2 } from 'lucide-react';
+import { Scan, Activity, Zap, Clock, Brain, RefreshCw, Camera, Fingerprint, ShieldAlert, Cpu, Loader2, Play } from 'lucide-react';
 
-// BioFuture Scan - v2.3 iOS 強制啟動終極版
-// 1. [修復] 卡在 Initializing: 加入 SetTimeout 強制播放機制，不再單純依賴事件監聽
-// 2. [優化] 增加詳細的 Debug 狀態顯示，讓用戶知道目前卡在哪一步
-// 3. [強化] 確保 Video 屬性 (autoplay, muted, playsinline) 完整，符合 iOS 規範
+// BioFuture Scan - v2.4 極速救援版
+// 1. [極速啟動] 不再等待 AI 初始化，優先啟動相機
+// 2. [暴力播放] 移除所有事件監聽等待，取得串流後直接 video.play()
+// 3. [救生圈] 增加「強制進入」按鈕，防止卡死在載入畫面
 
 const MP_VERSION = '0.4.1633559619'; 
 
@@ -12,45 +12,49 @@ export default function BioFutureScanApp() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   
-  // 狀態管理
+  // 狀態
   const [systemState, setSystemState] = useState('IDLE'); 
-  const [loadingStatus, setLoadingStatus] = useState("SYSTEM INITIALIZING...");
-  const [loadingError, setLoadingError] = useState(null);
-  const [scanProgress, setScanProgress] = useState(0);
+  const [loadingStatus, setLoadingStatus] = useState("SYSTEM STANDBY");
   const [debugMsg, setDebugMsg] = useState(""); 
+  const [showForceEntry, setShowForceEntry] = useState(false); // 救生圈按鈕
   
   const [metrics, setMetrics] = useState({
     stress: 0, age: 0, heartRate: 0, fatigue: 0
   });
+  const [scanProgress, setScanProgress] = useState(0);
 
   const faceMeshRef = useRef(null);
   const isLooping = useRef(false);
   const requestRef = useRef(null);
+  const aiReady = useRef(false);
 
-  // --- 1. 初始化設定 ---
+  // --- 1. 初始化 ---
   useEffect(() => {
+    // 樣式重置
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflowX = 'hidden';
     document.body.style.backgroundColor = '#0f172a';
-    document.documentElement.style.margin = '0';
-    document.documentElement.style.padding = '0';
-    document.documentElement.style.overflowX = 'hidden';
-
+    
+    // 注入字體
     const fontLink = document.createElement('link');
     fontLink.href = "https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap";
     fontLink.rel = "stylesheet";
     document.head.appendChild(fontLink);
 
+    // 注入 Tailwind
     if (!document.querySelector('script[src*="tailwindcss"]')) {
       const script = document.createElement('script');
       script.src = "https://cdn.tailwindcss.com";
       script.async = true;
       document.head.appendChild(script);
     }
+
+    // 背景預載入 AI (不阻擋 UI)
+    initAI();
   }, []);
 
-  // --- 2. 核心載入器 ---
+  // --- 2. AI 載入 (背景執行) ---
   const loadScript = (src) => {
     return new Promise((resolve, reject) => {
       if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
@@ -59,36 +63,30 @@ export default function BioFutureScanApp() {
       script.crossOrigin = "anonymous"; 
       script.async = true;
       script.onload = resolve;
-      script.onerror = () => reject(new Error(`無法載入 AI 模組`));
+      script.onerror = () => reject(new Error(`下載失敗`));
       document.body.appendChild(script);
     });
   };
 
   const initAI = async () => {
-    setLoadingError(null);
-    setLoadingStatus("LOADING NEURAL NETWORKS...");
-    
     try {
       try { if (window.process) window.process = undefined; } catch(e) {}
-
+      
+      // 靜默載入，不更新 LoadingStatus 以免干擾 UI
+      console.log("Downloading AI...");
       await loadScript(`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@${MP_VERSION}/face_mesh.js`);
       
-      setLoadingStatus("CALIBRATING SENSORS...");
-      await new Promise(r => setTimeout(r, 1000)); 
-
-      if (window.FaceMesh) {
-        setLoadingStatus("SYSTEM READY");
-      } else {
-        throw new Error("AI Core missing");
-      }
+      // 稍微等待全域變數註冊
+      setTimeout(() => {
+          if (window.FaceMesh) {
+              console.log("AI Ready");
+              aiReady.current = true;
+          }
+      }, 1000);
     } catch (e) {
-      console.error(e);
-      setLoadingError("連線不穩，請重試");
-      setLoadingStatus("CONNECTION FAILED");
+      console.error("AI Load Failed (Background)", e);
     }
   };
-
-  useEffect(() => { initAI(); }, []);
 
   // --- 3. 演算法邏輯 ---
   const analyzeFace = (landmarks) => {
@@ -112,18 +110,27 @@ export default function BioFutureScanApp() {
     }));
   };
 
-  // --- 4. 相機啟動邏輯 (v2.3 強制啟動版) ---
+  // --- 4. 相機啟動 (暴力版) ---
   const startScanning = async () => {
     setSystemState('STARTING'); 
-    setDebugMsg("Requesting Access...");
+    setLoadingStatus("REQUESTING CAMERA...");
+    setDebugMsg("Waiting for permission...");
+    setShowForceEntry(false);
+
+    // 啟動一個 8 秒的計時器，如果卡住就顯示「強制進入」按鈕
+    const safetyTimer = setTimeout(() => {
+        setDebugMsg("Slow network/camera detected.");
+        setShowForceEntry(true);
+    }, 8000);
     
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert("您的瀏覽器不支援相機功能，請使用 Safari。");
+      alert("不支援相機 API");
       setSystemState('IDLE');
       return;
     }
 
     try {
+      // 1. 取得串流
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
             width: { ideal: 1280 }, 
@@ -133,61 +140,65 @@ export default function BioFutureScanApp() {
         audio: false 
       });
       
-      setDebugMsg("Stream Acquired");
+      setDebugMsg("Stream OK. Linking...");
 
       if (videoRef.current) {
         const video = videoRef.current;
         video.srcObject = stream;
-        // iOS 必備屬性三劍客
-        video.setAttribute('playsinline', 'true'); 
-        video.setAttribute('autoplay', 'true');
         video.muted = true;
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('autoplay', 'true');
         
-        // 定義播放邏輯
-        const attemptPlay = async () => {
-            try {
-                setDebugMsg("Attempting Play...");
-                await video.play();
-                setDebugMsg("Video Playing");
-                
-                // 只要影片開始跑，就切換狀態
-                setSystemState('SCANNING');
-                startAI();
-            } catch(e) {
-                setDebugMsg("Play Error: " + e.name);
-                console.error(e);
-                // 如果是 NotAllowedError，代表需要再次手動觸發，這裡我們保持在 STARTING 狀態讓用戶知道
-            }
-        };
-
-        // 策略 A: 監聽事件
-        video.onloadedmetadata = () => {
-            setDebugMsg("Metadata Loaded");
-            attemptPlay();
-        };
-
-        // 策略 B: 強制倒數 (防止事件不觸發)
-        setTimeout(() => {
-            if (video.paused) {
-                setDebugMsg("Force Starting...");
-                attemptPlay();
-            }
-        }, 1000);
+        // 2. 暴力播放：不等待載入事件，直接 Play
+        try {
+            await video.play();
+            setDebugMsg("Playback Started");
+            clearTimeout(safetyTimer);
+            enterScanningMode();
+        } catch (playErr) {
+            console.warn("Auto-play blocked, retrying...", playErr);
+            setDebugMsg("Auto-play blocked. Retrying...");
+            // 如果第一次失敗，嘗試在 500ms 後再試一次
+            setTimeout(async () => {
+                try {
+                    await video.play();
+                    clearTimeout(safetyTimer);
+                    enterScanningMode();
+                } catch (e) {
+                    setDebugMsg("Play Failed: " + e.message);
+                    setShowForceEntry(true); // 真的播不動，顯示強制按鈕
+                }
+            }, 500);
+        }
       }
     } catch (e) {
-      setDebugMsg("Error: " + e.message);
-      alert("無法啟動相機: " + e.message);
+      setDebugMsg("Cam Error: " + e.name);
+      alert("相機錯誤: " + e.message);
       setSystemState('IDLE');
     }
   };
 
-  const startAI = async () => {
-    if (!window.FaceMesh) {
-        setDebugMsg("Waiting for AI...");
-        return; 
-    }
+  const enterScanningMode = () => {
+      setSystemState('SCANNING');
+      // 嘗試啟動 AI，如果 AI 還沒好，就等一下
+      if (aiReady.current) {
+          setupFaceMesh();
+      } else {
+          setDebugMsg("Camera OK. Waiting for AI...");
+          // 每秒檢查一次 AI 好了沒
+          const aiCheckInterval = setInterval(() => {
+              if (window.FaceMesh) {
+                  clearInterval(aiCheckInterval);
+                  setupFaceMesh();
+              }
+          }, 1000);
+      }
+  };
 
-    if (!faceMeshRef.current) {
+  const setupFaceMesh = () => {
+      if (faceMeshRef.current) return; // 避免重複初始化
+
+      try {
         const faceMesh = new window.FaceMesh({locateFile: (file) => 
             `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@${MP_VERSION}/${file}`});
         
@@ -202,8 +213,11 @@ export default function BioFutureScanApp() {
         faceMeshRef.current = faceMesh;
         
         isLooping.current = true;
+        setDebugMsg("System Fully Operational");
         processFrame();
-    }
+      } catch(e) {
+          setDebugMsg("AI Init Error: " + e.message);
+      }
   };
 
   const processFrame = async () => {
@@ -226,14 +240,15 @@ export default function BioFutureScanApp() {
     
     if (results.multiFaceLandmarks) {
       for (const landmarks of results.multiFaceLandmarks) {
+        // 繪製科技感網格
         ctx.strokeStyle = '#06b6d4'; 
         ctx.lineWidth = 0.5;
-        for (let i = 0; i < landmarks.length; i+=2) { 
+        for (let i = 0; i < landmarks.length; i+=3) { // 減少繪製點數以提升效能
             const x = landmarks[i].x * width;
             const y = landmarks[i].y * height;
             ctx.beginPath();
             ctx.arc(x, y, 1, 0, 2 * Math.PI);
-            ctx.fillStyle = 'rgba(6, 182, 212, 0.5)';
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.6)';
             ctx.fill();
         }
 
@@ -247,12 +262,20 @@ export default function BioFutureScanApp() {
     ctx.restore();
   };
 
+  // 進度條監聽
   useEffect(() => {
       if (scanProgress >= 100 && systemState === 'SCANNING') {
           setSystemState('ANALYZING');
           setTimeout(() => setSystemState('RESULT'), 2000);
       }
   }, [scanProgress, systemState]);
+
+  // 強制進入 (救生圈)
+  const forceEntry = () => {
+      setSystemState('SCANNING');
+      // 即使 AI 沒好，也先讓用家進去看到相機畫面
+      if (videoRef.current) videoRef.current.play();
+  };
 
   // --- UI Renders ---
 
@@ -321,25 +344,26 @@ export default function BioFutureScanApp() {
            </div>
            
            <h1 className="text-4xl md:text-7xl font-bold tracking-widest mb-2 text-center" style={{fontFamily: 'Orbitron'}}>BIO-SCAN</h1>
-           <p className="text-xs md:text-xl tracking-[0.3em] text-cyan-600 mb-12 text-center">生物特徵分析系統 V2.3</p>
+           <p className="text-xs md:text-xl tracking-[0.3em] text-cyan-600 mb-12 text-center">生物特徵分析系統 V2.4</p>
            
            <div className="border border-cyan-500/50 bg-slate-900/80 p-6 rounded-lg backdrop-blur-sm max-w-md w-full text-center mb-8">
               <p className="text-xs text-slate-400 mb-2">SYSTEM STATUS</p>
-              <p className={`text-lg ${loadingError ? 'text-red-500' : 'text-emerald-400'} animate-pulse`}>
-                  {systemState === 'STARTING' ? "INITIALIZING CAMERA..." : loadingStatus}
+              <p className={`text-lg text-emerald-400 animate-pulse`}>
+                  {systemState === 'STARTING' ? loadingStatus : "READY"}
               </p>
-              {/* 這裡會顯示詳細的除錯訊息，讓你知道卡在哪 */}
               {debugMsg && <p className="text-xs text-yellow-500 mt-2 font-mono border-t border-slate-700 pt-2">{debugMsg}</p>}
            </div>
 
+           {showForceEntry && (
+               <button onClick={forceEntry} style={{...styles.button, borderColor: '#ef4444', color: '#ef4444', marginBottom: '1rem'}}>
+                  <ShieldAlert className="w-6 h-6" /> FORCE ENTRY
+               </button>
+           )}
+
            {systemState === 'STARTING' ? (
               <button disabled style={{...styles.button, opacity: 0.7}}>
-                 <Loader2 className="w-6 h-6 animate-spin" /> LOADING...
+                 <Loader2 className="w-6 h-6 animate-spin" /> INITIALIZING...
               </button>
-           ) : loadingError ? (
-             <button onClick={() => initAI()} style={styles.button}>
-                <RefreshCw className="w-6 h-6" /> RETRY CONNECT
-             </button>
            ) : (
              <button onClick={startScanning} style={styles.button}>
                <Fingerprint className="w-6 h-6" /> START ANALYSIS
@@ -358,7 +382,7 @@ export default function BioFutureScanApp() {
         style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', opacity: 0.6 }} 
         playsInline 
         muted 
-        autoPlay // 強制自動播放
+        autoPlay 
       />
       <canvas 
         ref={canvasRef} 
@@ -373,7 +397,7 @@ export default function BioFutureScanApp() {
             <div className="flex flex-col gap-1">
                <div className="flex items-center gap-2 text-xs text-cyan-600">
                   <Activity className="w-4 h-4" />
-                  <span>LIVE FEED // {debugMsg}</span>
+                  <span>LIVE FEED // {debugMsg || 'ONLINE'}</span>
                </div>
                <h2 className="text-xl md:text-2xl font-bold tracking-widest border-l-4 border-cyan-500 pl-3">BIO-METRICS</h2>
             </div>
